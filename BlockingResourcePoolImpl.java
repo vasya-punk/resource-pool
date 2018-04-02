@@ -32,7 +32,7 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
 
     private BlockingQueue< R> objects;
 
-    private volatile AtomicInteger inUseCnt = new AtomicInteger(0);
+    private AtomicInteger inUseCnt = new AtomicInteger(0);
 
     private volatile boolean closeCalled;
 
