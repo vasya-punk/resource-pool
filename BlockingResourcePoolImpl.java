@@ -10,12 +10,12 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
 
     Logger logger = Logger.getLogger(BlockingResourcePoolImpl.class);
 
-    private ReentrantLock inUseLock = new ReentrantLock();
-    private Condition inUseNotEmpty = inUseLock.newCondition();
+    private ReentrantLock takeLock = new ReentrantLock();
+    private Condition inUseNotEmpty = takeLock.newCondition();
 
-    private ReentrantLock newLock = new ReentrantLock();
-    private Condition newNotEmpty = newLock.newCondition();
-    private Condition newNotFull = newLock.newCondition();
+    private ReentrantLock putLock = new ReentrantLock();
+    private Condition newNotEmpty = putLock.newCondition();
+    private Condition newNotFull = putLock.newCondition();
 
     private BlockingQueue< R> newObjects;
     private BlockingQueue< R> inUseObjects;
@@ -44,7 +44,7 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
             return false;
         }
 
-        newLock.lock();
+        putLock.lock();
         try {
             while(newObjects.remainingCapacity() == 0) newNotFull.await();
 
@@ -54,7 +54,7 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
             }
             return added;
         }finally {
-            newLock.unlock();
+            putLock.unlock();
         }
     }
 
@@ -71,7 +71,7 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
             return false;
         }
 
-        inUseLock.lock();
+        takeLock.lock();
         try {
             logger.debug("Start remove sync "+resource);
 
@@ -98,7 +98,7 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
                 return newObjects.remove(resource);
             }
         }finally {
-            inUseLock.unlock();
+            takeLock.unlock();
         }
     }
 
@@ -107,13 +107,13 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
         It returns true if the call resulted in the pool being modified and false otherwise.
      */
     public boolean removeNow(R resource){
-        logger.info("removeNow "+resource);
+        logger.info("Start removeNow "+resource);
         if(resource == null){
             logger.debug("End removeNow "+resource+ " - Invalid");
             return false;
         }
 
-        inUseLock.lock();
+        takeLock.lock();
         try {
             boolean result = false;
             if(newObjects.contains(resource))
@@ -128,7 +128,8 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
             }
             return result;
         }finally {
-            inUseLock.unlock();
+            logger.info("End removeNow "+resource);
+            takeLock.unlock();
         }
     }
 
@@ -140,7 +141,7 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
         logger.info("Start acquire");
 
         if(isOpen()) {
-            newLock.lock();
+            putLock.lock();
             logger.debug("Start acquire sync");
             try {
                 // block until a resource is available
@@ -154,7 +155,7 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
                 return t;
             } finally {
                 logger.debug("End acquire sync");
-                newLock.unlock();
+                putLock.unlock();
             }
 
         }
@@ -174,20 +175,22 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
 
         if(isOpen()) {
             R t = null;
-            if(newLock.tryLock(timeOut, unit)){
-                try {
-                    t = newObjects.poll();
+            putLock.lock();
+            logger.debug("Start acquire time sync");
+            try {
+                // block until a resource is available
+                if (newObjects.size() == 0) newNotEmpty.await(timeOut, unit);
 
-                    if(t!=null)
-                        inUseObjects.put(t);
+                t = newObjects.poll();
 
-                    return t;
-                } finally {
-                    newLock.unlock();
-                }
+                if(t!=null)
+                    inUseObjects.put(t);
+
+                return t;
+            } finally {
+                logger.debug("End acquire time sync");
+                putLock.unlock();
             }
-
-            return t;
         }
 
         throw new IllegalStateException(
@@ -205,7 +208,8 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
             return;
         }
 
-        inUseLock.lock();
+        takeLock.lock();
+        putLock.lock();
         try {
             logger.debug("Start release sync " + resource);
 
@@ -214,6 +218,7 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
                 inUseObjects.remove(resource);
 
                 newNotEmpty.signalAll();
+
                 if (inUseObjects.size() == 0) {
                     inUseNotEmpty.signalAll();
                 }
@@ -222,7 +227,10 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
                 logger.debug("End release sync " + resource + " - Invalid");
             }
         } finally {
-            inUseLock.unlock();
+            logger.debug("End release sync " + resource);
+
+            putLock.unlock();
+            takeLock.unlock();
         }
     }
 
@@ -239,7 +247,7 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
     @Override
     public void close() throws InterruptedException{
         logger.info("Start close");
-        inUseLock.lock();
+        takeLock.lock();
         logger.debug("Start close sync");
 
         // it blocks until all acquired resources are released.
@@ -249,7 +257,7 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
             closeNow();
         } finally {
             logger.debug("End close sync");
-            inUseLock.unlock();
+            takeLock.unlock();
         }
     }
 
