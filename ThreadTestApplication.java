@@ -10,18 +10,14 @@ import java.util.stream.Stream;
 public class ThreadTestApplication {
 
     public static void main(String[] args) {
-        BlockingResourcePoolImpl<Object> resourcePool = new BlockingResourcePoolImpl<>(2);
+        BlockingResourcePoolImpl<Object> resourcePool = new BlockingResourcePoolImpl<>(new LinkedBlockingQueue<>());
         new Thread(() -> {
-            try {
-                resourcePool.add(new Object());
-                resourcePool.add(new Object());
-                resourcePool.add(new Object());
-
-            } catch (InterruptedException e) {
-
-            }
+            resourcePool.add(new Object());
+            resourcePool.add(new Object());
+            resourcePool.add(new Object());
         }).start();
         resourcePool.open();
+
 
         // TODO: Try to close while some resources in use
         /*new Thread(() -> {
@@ -35,11 +31,7 @@ public class ThreadTestApplication {
             timer.schedule(new TimerTask() {
                 @Override
                 public void run() {
-                    try {
                         resourcePool.release(obj);
-                    }catch (InterruptedException e){
-
-                    }
                 }
             }, 10000);
 
@@ -61,7 +53,7 @@ public class ThreadTestApplication {
         }).start();*/
 
         // TODO: simultaneously acquired and released
-        /*new Thread(() -> {
+       /* new Thread(() -> {
 
             try {
 
@@ -76,11 +68,7 @@ public class ThreadTestApplication {
             timer.schedule(new TimerTask() {
                 @Override
                 public void run() {
-                    try {
                         resourcePool.release(obj);
-                    }catch (InterruptedException e){
-
-                    }
                 }
             }, 10000);
 
@@ -89,7 +77,7 @@ public class ThreadTestApplication {
         new Thread(() -> {
             try {
 
-                obj = resourcePool.acquire();
+                obj2 = resourcePool.acquire();
 
             }catch (InterruptedException e){
 
@@ -99,39 +87,35 @@ public class ThreadTestApplication {
             timer.schedule(new TimerTask() {
                 @Override
                 public void run() {
-                    try {
-                        resourcePool.release(obj);
-                    }catch (InterruptedException e){
-
-                    }
+                        resourcePool.release(obj2);
                 }
             }, 10000);
 
         }).start();*/
 
         //TODO:  wait to some resource will be available to acquire
-        /*new Thread(() -> {
+   /*     new Thread(() -> {
             try {
-
-                    obj = resourcePool.acquire();
-
-
-
+                obj = resourcePool.acquire();
 
                 Timer timer = new Timer();
                 timer.schedule(new TimerTask() {
                     @Override
                     public void run() {
-                        try {
-                            resourcePool.release(obj);
-
-                        }catch (InterruptedException e){
-
-                        }
+                        resourcePool.release(obj);
                     }
                 }, 10000);
             }catch (InterruptedException e) {
 
+
+            }
+        }).start();
+
+        new Thread(() -> {
+            try {
+                resourcePool.acquire();
+
+            }catch (InterruptedException e){
 
             }
 
@@ -162,41 +146,49 @@ public class ThreadTestApplication {
             try {
 
                 obj = resourcePool.acquire();
-System.out.println("sdfasd");
-                Timer timer = new Timer();
-                timer.schedule(new TimerTask() {
-                    @Override
-                    public void run() {
-                        try {
-                            resourcePool.release(obj);
-                        }catch (InterruptedException e){
+                boolean removed = resourcePool.remove(obj);
+                System.out.println("is removed? "+removed);
 
-                        }
-                    }
-                }, 15000);
 
-                        resourcePool.remove(obj);
-            }catch (InterruptedException e){
+            }catch (InterruptedException e) {
 
             }
-
-
-
         }).start();
-
-
 
         Timer timer = new Timer();
         timer.schedule(new TimerTask() {
             @Override
             public void run() {
-                resourcePool.removeNow(obj);
+                resourcePool.release(obj);
+            }
+        }, 10000);
+
+        new Thread(() -> {
+            try {
+
+                obj2 = resourcePool.acquire();
+                boolean removed = resourcePool.remove(obj2);
+                System.out.println("is removed? "+removed);
+
+
+            }catch (InterruptedException e) {
+
+            }
+        }).start();
+
+        // or removeNow
+        Timer timer2 = new Timer();
+        timer2.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                resourcePool.removeNow(obj2);
             }
         }, 10000);*/
 
 
+
         // TODO: Check if can't acquire in time
-       /* new Thread(() -> {
+        /*new Thread(() -> {
             try {
                 obj = resourcePool.acquire();
             }catch (InterruptedException e){
@@ -211,38 +203,25 @@ System.out.println("sdfasd");
             }
         }).start();
 
-        Timer timer = new Timer();
-        timer.schedule(new TimerTask() {
-            @Override
-            public void run() {
-                try {
-
-                    resourcePool.release(obj);
-                }catch (InterruptedException e){
-
-                }
-            }
-        }, 20000);
-
         new Thread(() -> {
             try {
-
-                Object object = resourcePool.acquire(10, TimeUnit.SECONDS);
+                resourcePool.acquire();
+                resourcePool.acquire(15, TimeUnit.SECONDS);
 
             }catch (InterruptedException e){
 
             }
         }).start();
 
-        new Thread(() -> {
-            try {
-                resourcePool.acquire();
-            }catch (InterruptedException e){
-
+        Timer timer = new Timer();
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                resourcePool.release(obj);
             }
-        }).start();*/
-
+        }, 10000);*/
     }
 
     public static volatile Object obj = null;
+    public static volatile Object obj2 = null;
 }
