@@ -6,7 +6,7 @@ public interface ResourcePool<R> {
     void close() throws InterruptedException;
     R acquire() throws InterruptedException;
     R acquire(long timeout, TimeUnit timeUnit) throws InterruptedException;
-    void release(R resource) throws InterruptedException;
-    boolean add(R resource) throws InterruptedException;
+    void release(R resource);
+    boolean add(R resource);
     boolean remove(R resource) throws InterruptedException;
 }
