@@ -1,7 +1,10 @@
 import org.apache.log4j.Logger;
 
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -9,55 +12,48 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
 
     Logger logger = Logger.getLogger(BlockingResourcePoolImpl.class);
 
-    private ExecutorService executor =
-            Executors.newCachedThreadPool();
-
     /** Lock held by acquire, remove, removeNow */
-    private ReentrantLock takeLock = new ReentrantLock();
+    private final ReentrantLock takeLock = new ReentrantLock();
 
     /** Wait queue for waiting takes */
-    private Condition notEmpty = takeLock.newCondition(); // if have some available resources. Signals when
+    private final Condition notEmpty = takeLock.newCondition();
 
-    /** Lock held by add, returnToPool, etc */
-    private ReentrantLock putLock = new ReentrantLock();
-
-    /** Wait queue for waiting puts */
-    private Condition notFull = putLock.newCondition();
-
-
-    private ReentrantLock releaseLock = new ReentrantLock();
+    /** Lock held by add, releaseAsync, etc */
+    private final ReentrantLock putLock = new ReentrantLock();
 
     /** Wait queue for waiting to release back some resource */
-    private Condition released = releaseLock.newCondition(); // Signals when release or returnToPool, remove or removeNow for close, remove
+    private final Condition released = putLock.newCondition();
 
-    private BlockingQueue< R> objects;
+    private final Queue<R> objects;
+    private final Set<R> acquiredObjects = new HashSet<>();
 
-    private AtomicInteger inUseCnt = new AtomicInteger(0);
+    private volatile boolean isOpened;
 
-    private volatile boolean closeCalled;
+    public BlockingResourcePoolImpl() {
+        this(new LinkedList<>());
+    }
 
-    public BlockingResourcePoolImpl(int size) {
-        objects = new LinkedBlockingQueue<>(size);
+    public BlockingResourcePoolImpl(Queue<R> resourceQueue) {
+        objects = resourceQueue;
 
-        closeCalled = true;
+        isOpened = false;
     }
 
     /*
         return true if the pool was modified
         as a result of the method call
         or false if the pool was not modified.
-
-        waiting if capacity is out
      */
     @Override
-    public boolean add(R resource) throws InterruptedException{
+    public boolean add(R resource){
         logger.info("add "+resource);
         putLock.lock();
         try {
             return objects.offer(resource);
         }finally {
-            signalNotEmpty();
             putLock.unlock();
+
+            signalNotEmpty();
         }
     }
 
@@ -74,24 +70,21 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
             return false;
         }
 
-        //only for waiting release
-        releaseLock.lock();
+        putLock.lock();
         try {
-            while (!objects.contains(resource)) released.await(); // wait while resource in use get back to the queue
+            logger.debug("Start remove sync " + resource);
+
+            while (acquiredObjects.contains(resource)) released.await(); // wait while resource in use get back to the queue
 
             takeLock.lock();
             try {
-                logger.debug("Start remove sync " + resource);
                 return objects.remove(resource);
             }finally {
-                logger.debug("Finally remove sync"+resource);
                 takeLock.unlock();
             }
         }finally {
-            if (objects.remainingCapacity() > 0) {
-                signalNotFull();
-            }
-            releaseLock.unlock();
+            logger.debug("Finally remove sync"+resource);
+            putLock.unlock();
         }
     }
 
@@ -107,18 +100,19 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
         }
 
         takeLock.lock();
-        logger.debug("Start removeNow sync "+resource);
-
         try {
-            logger.debug("End removeNow sync "+resource);
-            return objects.remove(resource);
-        }finally {
-            if (objects.remainingCapacity() > 0) {
-                signalNotFull();
-            }
+            logger.debug("Start removeNow sync "+resource);
 
+            if(acquiredObjects.contains(resource)){
+                return acquiredObjects.remove(resource);
+            }else {
+                return objects.remove(resource);
+            }
+        }finally {
             logger.info("Finally removeNow sync "+resource);
             takeLock.unlock();
+
+            signalReleased();
         }
     }
 
@@ -131,20 +125,16 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
 
         if(isOpen()) {
             takeLock.lock();
-            logger.debug("Start acquire sync");
             try {
+                logger.debug("Start acquire sync");
                 // block until a resource is available
                 while (objects.size() == 0) notEmpty.await();
 
-                R t = objects.poll();
+                R resource = objects.poll();
+                acquiredObjects.add(resource);
 
-                inUseCnt.incrementAndGet();
-
-                return t;
+                return resource;
             } finally {
-                if(objects.remainingCapacity() > 0){
-                    signalNotFull();
-                }
                 logger.debug("Finally acquire sync");
                 takeLock.unlock();
             }
@@ -165,22 +155,22 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
         logger.info("Start acquire time");
 
         if(isOpen()) {
-            R t = null;
             takeLock.lock();
-            logger.debug("Start acquire time sync");
             try {
+                logger.debug("Start acquire time sync");
                 // block until a resource is available
                 if (objects.size() == 0) notEmpty.await(timeOut, unit);
 
-                t = objects.poll();
+                if (objects.size() == 0) {
+                    return null;
+                }else {
+                    R resource = objects.poll();
+                    acquiredObjects.add(resource);
 
-                inUseCnt.incrementAndGet();
-
-                return t;
-            } finally {
-                if(objects.remainingCapacity() > 0){
-                    signalNotFull();
+                    return resource;
                 }
+
+            } finally {
                 logger.debug("Finally acquire time sync");
                 takeLock.unlock();
             }
@@ -191,149 +181,88 @@ public class BlockingResourcePoolImpl<R> implements ResourcePool<R> {
     }
 
     /*
-        Release resource at any time
+        Release resource
      */
     @Override
-    public void release(R resource) throws InterruptedException, IllegalArgumentException {
+    public void release(R resource) {
         logger.info("Start release "+resource);
         if(resource == null){
-            logger.debug("End release "+resource+ " - Invalid");
+            logger.debug("End release "+resource+ " - Invalid or not acquired");
             return;
         }
 
         putLock.lock();
-        releaseLock.lock();
         try {
             logger.debug("Start release sync " + resource);
 
-            if(inUseCnt.get() > 0){
-
-                if(!add(resource)){ // if not add, do it async
-                    returnToPool(resource);
-                }else {
-                    released.signalAll();
-                }
-
-                inUseCnt.decrementAndGet();
-            }else {
-                logger.debug("End release "+resource+ " - Invalid, we don't wait for it");
+            if(acquiredObjects.remove(resource)){
+                objects.add(resource);
             }
-
         } finally {
             logger.debug("Finally release sync " + resource);
-            releaseLock.unlock();
+            released.signal();
             putLock.unlock();
+
+            signalNotEmpty();
         }
     }
 
     @Override
     public void open() {
-        closeCalled = false;
+        isOpened = true;
     }
 
     @Override
     public boolean isOpen() {
-        return !closeCalled;
+        return isOpened;
     }
 
     @Override
     public void close() throws InterruptedException{
         logger.info("Start close");
 
-        // only for waiting release
-        releaseLock.lock();
+        putLock.lock();
         try {
             logger.debug("Start close sync");
 
             // it blocks until all acquired resources are released.
-            while(inUseCnt.get() > 0) released.await();
+            while(acquiredObjects.size() > 0) released.await();
 
-            putLock.lock();
-            try {
-                closeNow();
-            } finally {
-                logger.debug("Finally close sync");
-                putLock.unlock();
-            }
+            closeNow();
         }finally {
-            releaseLock.unlock();
+            logger.debug("Finally close sync");
+            putLock.unlock();
         }
     }
 
     public void closeNow() {
-        closeCalled = true;
+        isOpened = false;
     }
 
     /**
-     * Signals a waiting take. Called only from put/offer (which do not
+     * Signals a waiting take. Called only from add (which do not
      * otherwise ordinarily lock takeLock.)
      */
     private void signalNotEmpty() {
         takeLock.lock();
         try {
-            notEmpty.signalAll();
+            if (objects.size() > 0)
+                notEmpty.signal();
         } finally {
             takeLock.unlock();
         }
     }
 
     /**
-     * Signals a waiting release. Called only from returnToPool (which do not
-     * otherwise ordinarily lock takeLock.)
+     * Signals a waiting put. Called only from removeNow (which do not
+     * otherwise ordinarily lock putLock.)
      */
     private void signalReleased() {
-        takeLock.lock();
-        try {
-            released.signalAll();
-        } finally {
-            takeLock.unlock();
-        }
-    }
-
-    /**
-     * Signals a waiting put. Called only from acquire/remove.
-     */
-    private void signalNotFull() {
         putLock.lock();
         try {
-            notFull.signalAll();
+            released.signal();
         } finally {
             putLock.unlock();
-        }
-    }
-
-    private void returnToPool(R resource)
-    {
-        executor.submit(new ObjectReturner(objects, resource));
-    }
-
-    private class ObjectReturner < E >
-            implements Callable< Void > {
-        private BlockingQueue<E> queue;
-        private E e;
-
-        public ObjectReturner(BlockingQueue<E> queue, E e) {
-            this.queue = queue;
-            this.e = e;
-        }
-
-        public Void call() {
-            putLock.lock();
-            try {
-                while (queue.remainingCapacity() == 0) notFull.await();
-
-                queue.offer(e);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-            }finally {
-                if(queue.size() > 0){
-                    signalNotEmpty();
-                }
-                signalReleased();
-                putLock.unlock();
-            }
-
-            return null;
         }
     }
 }
